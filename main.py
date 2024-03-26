@@ -19,13 +19,6 @@ class FrameData:
         return f"FrameData: diff={self.diff}, lv={self.lv}, frame_num={self.frame.get(cv.CAP_PROP_POS_FRAMES)}"
 
 
-def compare_images(image1, image2):
-    diff = cv.absdiff(image1, image2)
-    diff = cv.cvtColor(diff, cv.COLOR_BGR2GRAY)
-    mean, _ = cv.meanStdDev(diff)
-    return mean[0]
-
-
 def compare_images_with_orb(image1, image2) -> float:
     # Initialize ORB detector
     orb = cv.ORB.create(nfeatures=1000, scoreType=cv.ORB_FAST_SCORE, WTA_K=2, patchSize=31, edgeThreshold=31)
@@ -77,22 +70,24 @@ def get_program_params() -> argparse.Namespace:
                         help='Path to the video file (default: input.mp4)')
     parser.add_argument('--output', type=str, default="output/output_%04d.png",
                         help='The output format for the images (default: output_%04d.png)')
-    parser.add_argument('--max-siml', type=float, default=0.75,
-                        help='The high similarity allowed between two subsequent outputs (default: 0.85)')
-    parser.add_argument('--min-siml', type=float, default=0.55,
-                        help='The lowest similarity allowed between two subsequent outputs (default: 0.55)')
-    parser.add_argument('--resize-scale', type=float, default=0.75,
+    parser.add_argument('--max-siml', type=float, default=0.7,
+                        help='The high similarity allowed between two subsequent outputs (default: 0.7)')
+    parser.add_argument('--min-siml', type=float, default=0.45,
+                        help='The lowest similarity allowed between two subsequent outputs (default: 0.45)')
+    parser.add_argument('--resize-scale', type=float, default=1.0,
                         help='Whether to resize the output images (default: 1.0 (no resize))')
+    parser.add_argument('--fps-scale', type=float, default=0.33,
+                        help='The rescale ratio for the FPS (ex: 60fps * 0.33 = 20fps) (default: 0.33)')
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Show intermediate images for debugging')
     return parser.parse_args()
 
 
-def write_and_show_image(image, output_format, img_num, debug):
+def write_and_show_image(image, output, img_num, debug):
     # create directory if it doesn't exist
-    os.makedirs(os.path.dirname(output_format), exist_ok=True)
+    os.makedirs(os.path.dirname(output), exist_ok=True)
     # write the image
-    cv.imwrite(output_format % img_num, image)
+    cv.imwrite(output % img_num, image)
     # show the image if debugging
     im_show_debug(image, 'Wrote Image', debug)
 
@@ -106,7 +101,7 @@ def im_show_debug(image, frame_name, debug, debug_img_text=None):
 
 
 def validate_args(video_source, output, max_similarity, min_similarity, resize_scale):
-    if min_similarity < 0.4:
+    if min_similarity < 0.35:
         o = input("Warning: The min_similarity threshold is too low. If we continue like this, colmap will "
                   "likely have a lot of trouble reconstructing the scene. Continue anyways? (y/n)")
         if o.lower() != 'y':
@@ -122,8 +117,23 @@ def validate_args(video_source, output, max_similarity, min_similarity, resize_s
         print(f"Error: The file {video_source} does not exist!")
         exit(1)
     # check write permissions
+    os.makedirs(os.path.dirname(output), exist_ok=True)
     if not os.access(os.path.dirname(output), os.W_OK):
         print(f"Error: The directory {os.path.dirname(output)} is not writable!")
+        exit(1)
+    # check if output dir is empty
+    if len(os.listdir(os.path.dirname(output))) > 0:
+        o = input(f"Warning: The directory {os.path.dirname(output)} is not empty. "
+                  f"Files may be overwritten. Continue anyways? (y/n)")
+        if o.lower() != 'y':
+            exit(1)
+        o = input(f"Would you like to clear the directory {os.path.dirname(output)}? (y/n)")
+        if o.lower() == 'y':
+            for f in os.listdir(os.path.dirname(output)):
+                os.remove(os.path.join(os.path.dirname(output), f))
+    # make sure the file name is not temp.mp4
+    if output == "temp.mp4":
+        print("Error: The output file name cannot be temp.mp4 because this name is reserved!")
         exit(1)
 
 
@@ -131,30 +141,45 @@ def main():
     arguments = get_program_params()
 
     video_source = arguments.arg1
+    # video_source = "latest.mp4"
     output = arguments.output
     max_similarity = arguments.max_siml
     min_similarity = arguments.min_siml
     resize_scale = arguments.resize_scale
+    # resize_scale = 0.5
+    fps_scale = arguments.fps_scale
     debug = arguments.debug
 
     # Validate the arguments; exit if invalid args supplied
     validate_args(video_source, output, max_similarity, min_similarity, resize_scale)
 
     capture = cv.VideoCapture(video_source)
+
     prev_frame = None
     frames_to_consider = []
+    frame_num = -1
     img_num = 0
 
-    num_frames = int(capture.get(cv.CAP_PROP_FRAME_COUNT))
     res_width = int(capture.get(cv.CAP_PROP_FRAME_WIDTH))
     res_height = int(capture.get(cv.CAP_PROP_FRAME_HEIGHT))
-    print(f"Processing video {video_source} with {num_frames} frames ({res_width}x{res_height})...")
+    current_fps = capture.get(cv.CAP_PROP_FPS)
+    num_frames = int(capture.get(cv.CAP_PROP_FRAME_COUNT))
+    print(f"Processing video {video_source} with {num_frames} frames ({res_width}x{res_height}) at {current_fps} FPS.")
+    if fps_scale != 1.0 or resize_scale != 1.0:
+        print(f"Resized frames by {resize_scale} and rescaling FPS by {fps_scale}.")
+        print(f"New resolution: {int(res_width * resize_scale)}x{int(res_height * resize_scale)} "
+              f"at {current_fps // int(1 / fps_scale)} FPS.")
 
-    for _ in tqdm(range(num_frames)):
+    for _ in tqdm(range(num_frames), "Processing frames..."):
         success, frame = capture.read()
         # If the frame is not read, then we have reached the end of the video
         if not success:
             break
+
+        frame_num += 1
+        if frame_num % int(1 / fps_scale) != 0:
+            continue
+
         # Resize the frame if needed
         # Note: downsizing can sharpen the image and make it less blurry
         if resize_scale != 1.0:
@@ -171,7 +196,6 @@ def main():
         else:
             # Compare the current frame to the previous frame
             similarity = compare_images_with_orb(prev_frame, frame)
-            im_show_debug(frame, 'Difference', debug, "Difference: %f" % similarity)
 
             if similarity < min_similarity and len(frames_to_consider) == 0:
                 print("Warning: The similarity between two subsequent frames was too low. "
@@ -182,13 +206,13 @@ def main():
             if min_similarity < similarity < max_similarity:
                 frames_to_consider.append(FrameData(frame, similarity, lv))
             elif similarity < min_similarity and len(frames_to_consider) > 0:
+                temp_sim = similarity
                 # find the least blurry frame in the list of frames to consider
                 least_blurry = min(frames_to_consider, key=lambda x: x.lv)
                 least_blurry_index = frames_to_consider.index(least_blurry)
                 # Write out the least blurry frame
                 write_and_show_image(least_blurry.frame, output, img_num, debug)
                 img_num += 1
-                prev_frame = least_blurry.frame
 
                 # Clear the list of frames including and before the current frame
                 for i in range(least_blurry_index + 1):
@@ -196,17 +220,24 @@ def main():
                 # Recalculate the difference for the current frame
                 for f in frames_to_consider:
                     f.diff = compare_images_with_orb(prev_frame, f.frame)
+                # Similarity between the written frame and the previous frame
+                similarity = least_blurry.diff
                 # Delete the frames where the difference is little
                 frames_to_consider = [f for f in frames_to_consider if f.diff > max_similarity]
                 # And... add the current frame
-                frames_to_consider.append(FrameData(frame, similarity, lv))
+                frames_to_consider.append(FrameData(frame, temp_sim, lv))
+
+                # set prev frame
+                prev_frame = least_blurry.frame
+
+            im_show_debug(frame, 'Difference', debug, "Difference: %f" % similarity)
 
     # Release the video capture object
     capture.release()
     # Close all OpenCV windows
     cv.destroyAllWindows()
 
-    print("Done! Output a total of {img_num} images.")
+    print(f"Done! Output a total of {img_num} images.")
 
 
 # Press the green button in the gutter to run the script.
