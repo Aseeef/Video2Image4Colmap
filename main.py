@@ -1,5 +1,7 @@
 import argparse
 import os
+from typing import Union
+
 from tqdm import tqdm
 
 import cv2 as cv
@@ -19,13 +21,19 @@ class FrameData:
         return f"FrameData: diff={self.diff}, lv={self.lv}, frame_num={self.frame.get(cv.CAP_PROP_POS_FRAMES)}"
 
 
-def compare_images_with_orb(image1, image2) -> float:
+def compare_images_with_orb(image1, image2) -> Union[float, None]:
     # Initialize ORB detector
     orb = cv.ORB.create(nfeatures=1000, scoreType=cv.ORB_FAST_SCORE, WTA_K=2, patchSize=31, edgeThreshold=31)
 
     # Detect keypoints and compute descriptors for both images
     keypoints1, descriptors1 = orb.detectAndCompute(image1, None)
     keypoints2, descriptors2 = orb.detectAndCompute(image2, None)
+
+    # If no keypoints are found then probably the image is too blurry or captured a textureless surface
+    if descriptors1 is None or descriptors2 is None:
+        return None
+    if len(keypoints1) == 0 or len(keypoints2) == 0:
+        return None
 
     # Initialize a brute-force matcher
     bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
@@ -197,6 +205,11 @@ def main():
             # Compare the current frame to the previous frame
             similarity = compare_images_with_orb(prev_frame, frame)
 
+            if similarity is None:
+                print("Warning: No keypoints detected in the current frame. This indicates that the frame is either"
+                      "too blurry or captured a textureless surface.")
+                continue
+
             if similarity < min_similarity and len(frames_to_consider) == 0:
                 print("Warning: The similarity between two subsequent frames was too low. "
                       "Either modify the min_similarity threshold or re-record the video "
@@ -219,6 +232,7 @@ def main():
                     frames_to_consider.pop(0)
                 # Recalculate the difference for the current frame
                 for f in frames_to_consider:
+                    # Should never be None if I reasoned through this right
                     f.diff = compare_images_with_orb(prev_frame, f.frame)
                 # Similarity between the written frame and the previous frame
                 similarity = least_blurry.diff
