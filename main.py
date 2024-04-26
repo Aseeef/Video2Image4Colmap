@@ -207,7 +207,7 @@ def main():
 
             if similarity is None:
                 print("Warning: No keypoints detected in the current frame. This indicates that the frame is either"
-                      "too blurry or captured a textureless surface.")
+                      " too blurry or captured a textureless surface.")
                 continue
 
             if similarity < min_similarity and len(frames_to_consider) == 0:
